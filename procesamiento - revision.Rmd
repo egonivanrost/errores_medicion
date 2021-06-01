@@ -1,0 +1,657 @@
+---
+title: Protocolo para el Análisis de los Errores de Medición en Estrato Forestal en torno a la Variable Biomasa Aérea
+author: "Egon Iván Rost"
+date: "01/06/2021"
+output:
+  word_document: default
+  html_document: default
+---
+
+## R Markdown
+
+Este es un archivo "R Markdown" con formato de salida HTML, para más información visitar: <http://rmarkdown.rstudio.com>. El lenguaje utilizado es R con el Entorno de Desarrollo Integrado (IDE) RStudio (R Core Team 2018, R: A language and environment for statistical computing, R Foundation for Statistical Computing, Vienna, Austria. URL https://www.R-project.org/). Si se ejecuta **Knit** desde el IDE se genera un documento que contiene la estructura general algorítmica y los resultados de los "chunks" (fragmentos de código) que lo conforman.
+
+## Procesamiento de la Información
+
+Se limpia el ambiente de trabajo, y luego se importan las librerías que contienen las herramientas que se van a utilizar (en caso de no estar instalado el paquete se debe realizar esta acción desde el repositorio CRAN). 
+
+```{r Librerías y Funciones }
+
+rm(list=ls())
+
+install.packages("pacman")
+pacman::p_load(plyr, dplyr, aplpack, car, data.table, gmodels, knitr, rstatix, tidyr, tidyverse, VIM)
+
+#Función que aplica el método "Bivariado de Bagplot" de detección de "outliers" (valores atípicos) que se utiliza para la limpieza de los datos de la muestra. Un "Bagplot", o diagrama de bolsas, es una generalización bivariada del diagrama univariado "Boxplot" o de caja. Ha sido propuesto por Rousseeuw, Ruts y Tukey. La noción clave es la profundidad de localización en el medio espacio de un punto relativo a un conjunto de datos bivariados, lo que amplía el concepto univariado de rango. En el caso bivariado, la caja de la gráfica de caja cambia a un casco convexo similar a una bolsa. La "mediana de la profundidad" es la ubicación más profunda, y está rodeada por una "bolsa" que contiene las observaciones n/2 de mayor profundidad. Si se amplía la bolsa por un factor, por ejemplo = 3, se obtiene la "valla" (que no está trazada). Las observaciones entre la bolsa y la valla están marcadas por un lazo gris claro, mientras que las observaciones fuera de la valla están marcadas como valores atípicos. El bagplot visualiza la ubicación, la dispersión, la correlación, el sesgo y las colas de los datos.
+
+#Rousseeuw, P., Ruts, I., y Tukey, J. (1999). The Bagplot: A Bivariate Boxplot. American Statistician. AMER STATIST, 53. 382-387. https://doi.org/10.1080/00031305.1999.10474494
+
+Bagplot_DAP_altura <- function(tabla_con_datos){
+#Generación de insumos con las variables de interés para el estudio: altura total y DAP (diámetro a la altura del pecho).
+ tree <- tabla_con_datos
+ limits=NULL
+ idnotNA <- which(!is.na(tree$dap_m) & !is.na(tree$altura_total_m))
+ a <- with(tree, as.matrix(cbind(dap_m[idnotNA], altura_total_m[idnotNA])))
+ if(is.matrix(a)){
+ a = list("x" = a[,1], "y" = a[,2])
+ }
+ if(is.null(limits)){
+ limits = c(range(a$x), range(a$y))
+ }
+ summary(p1 <- powerTransform(cbind(y, x) ~ 1, a))
+#Aplicación del método Bagplot y visualización gráfica del resultado.
+  bag_trans <- with(a, compute.bagplot(x^coef(p1)["x"], y^coef(p1)["y"], approx.limit = 1000, factor = 3.0, precision = 1,  dkmethod = 2, debug.plots = TRUE))
+  plot(bag_trans, xlim = range(a$x^coef(p1)["x"]), ylim = range(a$y^coef(p1)["y"]), xlab = "log dap_m", ylab = "altura_total_m   log", main = "Gráfico de Bagplot dap-altura")
+#Identificación de los "outliers", valores atípicos.
+  k <- which(bag_trans$xydata[,1] %in% bag_trans$pxy.outlier[,1] & bag_trans$xydata[,2] %in% bag_trans$pxy.outlier[,2])
+  idoutliers <- unlist(sapply(k, function(i) which(tree$dap_m == a$x[i] & tree$altura_total_m == a$y[i])))
+#Exportación de vector con valores atípicos.  
+return (idoutliers)
+}
+
+```
+
+Se carga el insumo que en este caso es la tabla de la población muestra correspondiente al Estrato Forestal. Se realiza una limpieza inicial de datos en base a los protocolos planteados.
+
+Este paso es aplicable a las dos muestras (inventario y auditoría) ya que los protocolos rigen para ambas.
+
+```{r Carga de Insumo y Limpieza Inicial, fig.show="hold", out.width="40%"}
+
+#Insumo
+tabla_insumo <- read.table("tabla_archivo.csv", sep = ",", header = TRUE, dec = ".")
+
+#Depuración de fustes en parcela A que no cumplen los requisitos definidos en los protocolos
+parcela_A_dap_menor_20cm <- tabla_insumo %>% filter(c(parcela_concentrica== "A" & dap_fuste_cm < 20 )) 
+
+#Depuración de fustes en parcela B que no cumplen los requisitos definidos en los protocolos
+parcela_B_dap_menor_10cm <- tabla_insumo %>% filter(c(parcela_concentrica== "B" & dap_fuste_cm < 10)) 
+parcela_B_dap_mayorigual_20cm <- tabla_insumo %>% filter(c(parcela_concentrica== "B" & dap_fuste_cm >= 20)) 
+
+#Visualización en gráficos de barras de registros incorrectos encontrados
+incorrec_fustes_A  <- table(parcela_A_dap_menor_20cm$muestra)
+barplot(incorrec_fustes_A, main = "Registros Incorrectos de Fustes en Parcela A", xlab = paste("Diferencia entre muestras =", as.character(incorrec_fustes_A[2]-incorrec_fustes_A[1])))
+
+#Depuración de la tabla insumo
+tabla_insumo_depurada <- tabla_insumo %>% filter(!c((parcela_concentrica == "A" & dap_fuste_cm < 20)))
+
+#Rescate y reasignación (a parcela A) de los fustes mayores a 20 cm registrados en parcela B
+tabla_insumo_depurada$indiv_no <- as.numeric(tabla_insumo_depurada$indiv_no) 
+no_indiv_max <- max(tabla_insumo_depurada$indiv_no, na.rm = TRUE)
+pasarA <- which(tabla_insumo_depurada$parcela_concentrica == "B" & tabla_insumo_depurada$dap_fuste_cm >= 20) 
+tabla_insumo_depurada$parcela_concentrica[pasarA] <- "A"
+tabla_insumo_depurada$indiv_no[pasarA] <- tabla_insumo_depurada$indiv_no[pasarA] + no_indiv_max
+
+
+```
+
+Después de una exploración de la tabla insumo depurada se detectan algunos "NA" (sin dato, "not available") para una cantidad de registros en algunas variables. Se procede que no serán consideradas para el posterior análisis). Luego al discriminar entre la población muestra del Inventario y la de Auditoría, la mayor cantidad de NA se encuentran en esta última, y ningún registro en la primera. Particularmente la variable más afectada es especie_nombre_científico; esto ocurrió aparentemente debido a una falla de compatibilidad en actualizaciones de los softwares utilizados vinculado a cambios en la lista de especies. Es importante tener en cuenta este aspecto para posteriores procedimientos.
+
+```{r NA por Variable de la Tabla Insumo, fig.show="hold", out.width="40%"}
+
+sapply(tabla_insumo_depurada, function(x) sum(is.na(x)))
+tabla_insumo_depurada <- subset (tabla_insumo_depurada, select = -c(referencia, azimut_ind, distancia_ind))
+lista_NA <- split(tabla_insumo_depurada, tabla_insumo_depurada$muestra)
+sapply(lista_NA, function(x) sum(is.na(x)))
+aggr(lista_NA$inventario, sortVars = TRUE, sortCombs = TRUE, cex.axis = .9, oma = c(10,5,5,3))
+title(main = "NA en la Población Muestra del Inventario")
+aggr(lista_NA$auditoria, sortVars = TRUE, sortCombs = TRUE, cex.axis = .9, oma = c(10,5,5,3))
+title(main = "NA en la Población Muestra de la Auditoría")
+sapply(lista_NA$auditoria, function(x) sum(is.na(x)))
+
+```
+
+A continuación, se van a crear columnas nuevas (variables accesorias) que permiten continuar además con el siguiente paso de la limpieza de datos (determinación de valores atípicos u "outliers" en inglés) y facilitará los cálculos posteriores. La variable DAP se convierte a metros, y los fustes pertenecientes a un mismo individuo leñoso (polifustales) se agrupan con una fórmula específica a fin de obtener un solo valor de DAP por cada individuo muestreado. La fórmula a utilizar es: d=√∑di² que plantea la raíz de la sumatoria de los cuadrados de cada uno de los diámetros.
+
+```{r Incorporación de Variables Accesorias }
+
+#Nueva columna DAP en metros
+tabla_insumo_depurada$dap_fuste_m <- tabla_insumo_depurada$dap_fuste_cm/100
+
+#Nueva columna DAP elevado al cuadrado
+tabla_insumo_depurada$dap_cuadratico_m <- tabla_insumo_depurada$dap_fuste_m^2
+
+#Asignación de NA en los nombres científicos de especies a "UNLISTED" para correcto uso de funciones
+tabla_insumo_depurada$especie_nombre_cientifico <- as.character(tabla_insumo_depurada$especie_nombre_cientifico)
+tabla_insumo_depurada$especie_nombre_cientifico[is.na(tabla_insumo_depurada$especie_nombre_cientifico)] <- "UNLISTED"
+tabla_insumo_depurada$especie_nombre_cientifico <- as.factor(tabla_insumo_depurada$especie_nombre_cientifico)
+tabla_insumo_depurada$etiqueta_indiv <- paste(tabla_insumo_depurada$id_um, tabla_insumo_depurada$indiv_no, tabla_insumo_depurada$parcela_concentrica, tabla_insumo_depurada$muestra, sep = "_")
+
+#Armado de tabla de individuos leñosos y DAP calculado para polifustales. La función aggregate() omite por default los valores NA presentes en este caso en la variable vinculada al dap.
+tabla_individuos <- aggregate(dap_cuadratico_m ~ etiqueta_indiv + id_um + parcela_concentrica + indiv_no + especie_nombre_cientifico + altura_total_m + muestra, FUN = sum, data = tabla_insumo_depurada)
+tabla_individuos$dap_m <- sqrt(tabla_individuos$dap_cuadratico_m)
+
+```
+
+Se continua con el análisis de valores atípicos, también conocidos como "outliers", utilizando el Método Bivariado de "Bagplot". 
+
+```{r Detección de Valores Atípicos, fig.show="hold", out.width="40%" }
+
+#Aplicación del Método Bivariado de Bagplot
+valores_atipicos <- Bagplot_DAP_altura(tabla_individuos)
+
+#Exploración de los valores atípicos identificados en una tabla
+valores_atipicos_df <- tabla_individuos[c(valores_atipicos),]
+
+#Desvinculación de los valores atípicos confirmados
+tabla_individuos <- tabla_individuos[-c(valores_atipicos),]
+
+```
+
+Luego de la limpieza de los datos, se puede empezar a realizar los cálculos dasométricos por parcela de registro para las variables de interés para cada UM: cantidad de individuos, cantidad de fustes registrados, sumatoria de DAP, área basal, altura promedio, y biomasa aérea. La función aggregate(), como ya se mencionó, no considera los valores NA presentes. Para el cálculo de la sección normal de los individuos leñosos se utiliza la fórmula de la superficie del círculo en base al diámetro. En particular, para la estimación de biomasa aérea se utiliza una ecuación general en pos de dar un tratamiento homogéneo a los datos y evitar distorsiones que podrían surgir en base al proceso de indetificación de las especies leñosas presentes (se debe considerar además el % de afectación citado anteriormente en esta variable sobre la población muestra de Auditoría). La ecuación general seleccionada es la de Chave et. al 2014, con valor medio de densidad de leño para bosques subtropicales de Sur America (0.715 +/- 0.210 g/cm3) propuesto por Zanne et al. 2009. 
+
+Chave, J., Réjou‐Méchain, M., Búrquez, A., Chidumayo, E., Colgan, M. S., Delitti, W. B., Duque, A., Eid, T., Fearnside, P. M., Goodman, R. S., Henry, M., Martínez-Yrízar, A., Mugasha, W. A., Muller-Landau, H. C., Mencuccini, M., y Nelson, W. B. (2014). Improved allometric models to estimate the aboveground biomass of tropical trees. Global change biology, 20(10), 3177-3190. https://doi.org/10.1111/gcb.12629
+
+Zanne, A. E., Lopez-Gonzalez, G., Coomes, D. A., Ilic, J., Jansen, S., Lewis, S. L., Miller, R. B., Swenson, N. G., Wiemann, M. C. y Chave, J. (2009). DRYAD. Towards a worldwide wood economics spectrum. Recuperado el 01 de octubre de 2020 de https://datadryad.org/stash/dataset/doi:10.5061/dryad.234
+
+También se realizan los tests de normalidad de Shapiro - Wilk para inferir si las distribuciones de los resultados de los cálculos por UM son normales o "Gaussianas". Esto es importante para luego aplicar procedimientos paramétricos, en general con un tamaño de la muestra mayor a 30 se considera suficiente para aplicar algunos como los tests de significancia (por ejemplo el t de Student) incluso si los datos no están normalmente distribuidos.
+
+Ghasemi, A., y Zahediasl, S. (2012). Normality tests for statistical analysis: a guide for non-statisticians. International journal of endocrinology and metabolism, 10(2), 486–489. https://doi.org/10.5812/ijem.3505
+
+```{r Resultados Dasométricos por UM  }
+
+#Cálculo de la cantidad de individuos en cada UM
+cantidad_individuos_UM <- aggregate(indiv_no ~ id_um + parcela_concentrica + muestra, FUN = length, data = tabla_individuos)
+colnames(cantidad_individuos_UM)<- c("id_um", "parcela_concentrica", "muestra", "cantidad_individuos")
+cantidad_individuos_UM <- cantidad_individuos_UM %>% pivot_wider(names_from = muestra, values_from = c(cantidad_individuos))
+cantidad_individuos_UM$auditoria[is.na(cantidad_individuos_UM$auditoria)] <- 0
+cantidad_individuos_UM$inventario[is.na(cantidad_individuos_UM$inventario)] <- 0
+cantidad_individuos_UM <- cantidad_individuos_UM %>% pivot_longer(-(c(id_um, parcela_concentrica)), names_to = "muestra", values_to = "cantidad_individuos")
+cantindividuos_UMtotal <- aggregate(indiv_no ~ id_um + muestra, FUN = length, data = tabla_individuos)
+cantindividuos_UMtotal$parcela_concentrica <- "UM total"
+cantindividuos_UMtotal <- cantindividuos_UMtotal[c(1,4,2,3)]
+colnames(cantindividuos_UMtotal)<- c("id_um", "parcela_concentrica", "muestra", "cantidad_individuos")
+cantindividuos_UMtotal <- cantindividuos_UMtotal %>% pivot_wider(names_from = muestra, values_from = c(cantidad_individuos))
+cantindividuos_UMtotal$auditoria[is.na(cantindividuos_UMtotal$auditoria)] <- 0
+cantindividuos_UMtotal$inventario[is.na(cantindividuos_UMtotal$inventario)] <- 0
+cantindividuos_UMtotal <- cantindividuos_UMtotal %>% pivot_longer(-(c(id_um, parcela_concentrica)), names_to = "muestra", values_to = "cantidad_individuos")
+cantidad_individuos_UM <- full_join(cantidad_individuos_UM, cantindividuos_UMtotal)
+
+#Cálculo de la cantidad de fustes registrados en cada UM
+cantidad_fustes_UM <- aggregate(fuste_no ~ id_um + parcela_concentrica + muestra, FUN = length, data = tabla_insumo_depurada)
+colnames(cantidad_fustes_UM)<- c("id_um", "parcela_concentrica", "muestra", "cantidad_fustes")
+cantidad_fustes_UM <- cantidad_fustes_UM %>% pivot_wider(names_from = muestra, values_from = c(cantidad_fustes))
+cantidad_fustes_UM$auditoria[is.na(cantidad_fustes_UM$auditoria)] <- 0
+cantidad_fustes_UM$inventario[is.na(cantidad_fustes_UM$inventario)] <- 0
+cantidad_fustes_UM <- cantidad_fustes_UM %>% pivot_longer(-(c(id_um, parcela_concentrica)), names_to = "muestra", values_to = "cantidad_fustes")
+cantfustes_UMtotal <- aggregate(fuste_no ~ id_um + muestra, FUN = length, data = tabla_insumo_depurada)
+cantfustes_UMtotal$parcela_concentrica <- "UM total"
+cantfustes_UMtotal <- cantfustes_UMtotal[c(1,4,2,3)]
+colnames(cantfustes_UMtotal)<- c("id_um", "parcela_concentrica", "muestra", "cantidad_fustes")
+cantfustes_UMtotal <- cantfustes_UMtotal %>% pivot_wider(names_from = muestra, values_from = c(cantidad_fustes))
+cantfustes_UMtotal$auditoria[is.na(cantfustes_UMtotal$auditoria)] <- 0
+cantfustes_UMtotal$inventario[is.na(cantfustes_UMtotal$inventario)] <- 0
+cantfustes_UMtotal <- cantfustes_UMtotal %>% pivot_longer(-(c(id_um, parcela_concentrica)), names_to = "muestra", values_to = "cantidad_fustes")
+cantidad_fustes_UM <- full_join(cantidad_fustes_UM, cantfustes_UMtotal)
+
+#Cálculo de la sumatoria de DAP registrados en cada UM
+sumatoria_DAP_UM <- aggregate(dap_m ~ id_um + parcela_concentrica + muestra, FUN = sum, data = tabla_individuos)
+colnames(sumatoria_DAP_UM)<- c("id_um", "parcela_concentrica", "muestra", "sumatoria_dap_m")
+sumatoria_DAP_UM <- sumatoria_DAP_UM %>% pivot_wider(names_from = muestra, values_from = c(sumatoria_dap_m))
+sumatoria_DAP_UM$auditoria[is.na(sumatoria_DAP_UM$auditoria)] <- 0
+sumatoria_DAP_UM$inventario[is.na(sumatoria_DAP_UM$inventario)] <- 0
+sumatoria_DAP_UM <- sumatoria_DAP_UM %>% pivot_longer(-(c(id_um, parcela_concentrica)), names_to = "muestra", values_to = "sumatoria_dap_m")
+sumdap_UMtotal <- aggregate(dap_m ~ id_um + muestra, FUN = sum, data = tabla_individuos)
+sumdap_UMtotal$parcela_concentrica <- "UM total"
+sumdap_UMtotal <- sumdap_UMtotal[c(1,4,2,3)]
+colnames(sumdap_UMtotal)<- c("id_um", "parcela_concentrica", "muestra", "sumatoria_dap_m")
+sumdap_UMtotal <- sumdap_UMtotal %>% pivot_wider(names_from = muestra, values_from = c(sumatoria_dap_m))
+sumdap_UMtotal$auditoria[is.na(sumdap_UMtotal$auditoria)] <- 0
+sumdap_UMtotal$inventario[is.na(sumdap_UMtotal$inventario)] <- 0
+sumdap_UMtotal <- sumdap_UMtotal %>% pivot_longer(-(c(id_um, parcela_concentrica)), names_to = "muestra", values_to = "sumatoria_dap_m")
+sumatoria_DAP_UM  <- full_join(sumatoria_DAP_UM, sumdap_UMtotal)
+
+#Cálculo del área basal por parcela en cada UM
+tabla_individuos$seccion_normal <- (tabla_individuos$dap_m^2)*(pi/4)
+area_basal_UM <- aggregate(seccion_normal ~ id_um + parcela_concentrica + muestra, FUN = sum, data = tabla_individuos)
+colnames(area_basal_UM)<- c("id_um", "parcela_concentrica", "muestra", "area_basal_m2")
+area_basal_UM <- area_basal_UM %>% pivot_wider(names_from = muestra, values_from = c(area_basal_m2))
+area_basal_UM$auditoria[is.na(area_basal_UM$auditoria)] <- 0
+area_basal_UM$inventario[is.na(area_basal_UM$inventario)] <- 0
+area_basal_UM <- area_basal_UM %>% pivot_longer(-(c(id_um, parcela_concentrica)), names_to = "muestra", values_to = "area_basal_m2")
+areabasal_UMtotal <- aggregate(seccion_normal ~ id_um + muestra, FUN = sum, data = tabla_individuos)
+areabasal_UMtotal$parcela_concentrica <- "UM total"
+areabasal_UMtotal <- areabasal_UMtotal[c(1,4,2,3)]
+colnames(areabasal_UMtotal)<- c("id_um", "parcela_concentrica", "muestra", "area_basal_m2")
+areabasal_UMtotal <- areabasal_UMtotal %>% pivot_wider(names_from = muestra, values_from = c(area_basal_m2))
+areabasal_UMtotal$auditoria[is.na(areabasal_UMtotal$auditoria)] <- 0
+areabasal_UMtotal$inventario[is.na(areabasal_UMtotal$inventario)] <- 0
+areabasal_UMtotal <- areabasal_UMtotal %>% pivot_longer(-(c(id_um, parcela_concentrica)), names_to = "muestra", values_to = "area_basal_m2")
+area_basal_UM <- full_join(area_basal_UM, areabasal_UMtotal)
+
+#Cálculo de la altura promedio por parcela en cada UM
+altura_promedio_UM <- aggregate(altura_total_m ~ id_um + parcela_concentrica + muestra, FUN = mean, data = tabla_individuos)
+colnames(altura_promedio_UM)<- c("id_um", "parcela_concentrica", "muestra", "altura_promedio_m")
+altura_promedio_UM <- altura_promedio_UM %>% pivot_wider(names_from = muestra, values_from = c(altura_promedio_m))
+altura_promedio_UM$auditoria[is.na(altura_promedio_UM$auditoria)] <- 0
+altura_promedio_UM$inventario[is.na(altura_promedio_UM$inventario)] <- 0
+altura_promedio_UM <- altura_promedio_UM %>% pivot_longer(-(c(id_um, parcela_concentrica)), names_to = "muestra", values_to = "altura_promedio_m")
+alturaprom_UMtotal <- aggregate(altura_total_m ~ id_um + muestra, FUN = mean, data = tabla_individuos)
+alturaprom_UMtotal$parcela_concentrica <- "UM total"
+alturaprom_UMtotal <- alturaprom_UMtotal[c(1,4,2,3)]
+colnames(alturaprom_UMtotal)<- c("id_um", "parcela_concentrica", "muestra", "altura_promedio_m")
+alturaprom_UMtotal <- alturaprom_UMtotal %>% pivot_wider(names_from = muestra, values_from = c(altura_promedio_m))
+alturaprom_UMtotal$auditoria[is.na(alturaprom_UMtotal$auditoria)] <- 0
+alturaprom_UMtotal$inventario[is.na(alturaprom_UMtotal$inventario)] <- 0
+alturaprom_UMtotal <- alturaprom_UMtotal %>% pivot_longer(-(c(id_um, parcela_concentrica)), names_to = "muestra", values_to = "altura_promedio_m")
+altura_promedio_UM <- full_join(altura_promedio_UM, alturaprom_UMtotal)
+
+#Cálculo de la biomasa aérea por parcela en cada UM
+tabla_individuos$biomasa_aerea_kg <- 0.0673*(0.715*((tabla_individuos$dap_m*100)^2)*tabla_individuos$altura_total_m)^0.976
+biomasa_aerea_UM <- aggregate(biomasa_aerea_kg ~ id_um + parcela_concentrica + muestra, FUN = sum, data = tabla_individuos)
+biomasa_aerea_UM$biomasa_aerea_kg <- biomasa_aerea_UM$biomasa_aerea_kg/1000
+colnames(biomasa_aerea_UM)<- c("id_um", "parcela_concentrica", "muestra", "biomasa_aerea_tn")
+biomasa_aerea_UM <- biomasa_aerea_UM %>% pivot_wider(names_from = muestra, values_from = c(biomasa_aerea_tn))
+biomasa_aerea_UM$auditoria[is.na(biomasa_aerea_UM$auditoria)] <- 0
+biomasa_aerea_UM$inventario[is.na(biomasa_aerea_UM$inventario)] <- 0
+biomasa_aerea_UM <- biomasa_aerea_UM %>% pivot_longer(-(c(id_um, parcela_concentrica)), names_to = "muestra", values_to = "biomasa_aerea_tn")
+biomasa_aerea_UMtotal <- aggregate(biomasa_aerea_kg ~ id_um + muestra, FUN = sum, data = tabla_individuos)
+biomasa_aerea_UMtotal$biomasa_aerea_kg <- biomasa_aerea_UMtotal$biomasa_aerea_kg/1000
+biomasa_aerea_UMtotal$parcela_concentrica <- "UM total"
+biomasa_aerea_UMtotal <- biomasa_aerea_UMtotal[c(1,4,2,3)]
+colnames(biomasa_aerea_UMtotal)<- c("id_um", "parcela_concentrica", "muestra", "biomasa_aerea_tn")
+biomasa_aerea_UMtotal <- biomasa_aerea_UMtotal %>% pivot_wider(names_from = muestra, values_from = c(biomasa_aerea_tn))
+biomasa_aerea_UMtotal$auditoria[is.na(biomasa_aerea_UMtotal$auditoria)] <- 0
+biomasa_aerea_UMtotal$inventario[is.na(biomasa_aerea_UMtotal$inventario)] <- 0
+biomasa_aerea_UMtotal <- biomasa_aerea_UMtotal %>% pivot_longer(-(c(id_um, parcela_concentrica)), names_to = "muestra", values_to = "biomasa_aerea_tn")
+biomasa_aerea_UM <- full_join(biomasa_aerea_UM, biomasa_aerea_UMtotal)
+
+#Unión de tablas
+resultados_UM <- join_all(list(cantidad_individuos_UM, cantidad_fustes_UM, sumatoria_DAP_UM, area_basal_UM, altura_promedio_UM, biomasa_aerea_UM), by=c("id_um","parcela_concentrica","muestra"), type="full")
+
+#Tests de normalidad
+resultados_UM %>% filter(muestra == "inventario") %>% group_by(parcela_concentrica) %>% shapiro_test(cantidad_individuos, cantidad_fustes, sumatoria_dap_m, area_basal_m2, altura_promedio_m, biomasa_aerea_tn) %>% add_significance()
+resultados_UM %>% filter(muestra == "auditoria") %>% group_by(parcela_concentrica) %>% shapiro_test(cantidad_individuos, cantidad_fustes, sumatoria_dap_m, area_basal_m2, altura_promedio_m, biomasa_aerea_tn) %>% add_significance()
+
+```
+
+## Análisis de la Información
+
+El análisis se inicia calculando los resultados de las diferencias (denominada como "delta") entre las dos muestras para cada UM. La muestra que se considera de referencia e insesgada, es la de Auditoría (se asume que fue realizada sin apuros y con protocolos cuidadosos de medición). Posteriormente se realiza un "Gráfico de Densidad" que se utiliza para visualizar la forma de la distribución de los resultados y es una variación de un Histograma (al cual se le aplica un "suavizado de Kernel"). Se discrimina entre parcela A y B (por tamaño de los individuos leñosos). Los picos de un Gráfico de Densidad ayudan a detectar donde se concentran los valores a lo largo del intervalo que definen los mismos datos.
+
+Stanisław, W. (2018). Kernel density estimation and its application. ITM Web Conf., 23, 00037. https://doi.org/10.1051/itmconf/20182300037 
+
+```{r Estimación de las Diferencias (delta) por Variables Dasométricas, fig.show="hold", out.width="40%" }
+
+#Delta cantidad de individuos
+diferencias_cantindividuos <- cantidad_individuos_UM %>% pivot_wider(names_from = muestra, values_from = c(cantidad_individuos))
+diferencias_cantindividuos$auditoria[is.na(diferencias_cantindividuos$auditoria)] <- 0
+diferencias_cantindividuos$inventario[is.na(diferencias_cantindividuos$inventario)] <- 0
+diferencias_cantindividuos <- diferencias_cantindividuos %>%  mutate(delta_cantindividuos = auditoria - inventario)
+
+#Delta cantidad de fustes
+diferencias_cantfustes <- cantidad_fustes_UM %>% pivot_wider(names_from = muestra, values_from = c(cantidad_fustes))
+diferencias_cantfustes$auditoria[is.na(diferencias_cantfustes$auditoria)] <- 0
+diferencias_cantfustes$inventario[is.na(diferencias_cantfustes$inventario)] <- 0
+diferencias_cantfustes <- diferencias_cantfustes %>%  mutate(delta_cantfustes = auditoria - inventario)
+
+#Delta sumatoria de DAP
+diferencias_sumdap <- sumatoria_DAP_UM %>% pivot_wider(names_from = muestra, values_from = c(sumatoria_dap_m))
+diferencias_sumdap$auditoria[is.na(diferencias_sumdap$auditoria)] <- 0
+diferencias_sumdap$inventario[is.na(diferencias_sumdap$inventario)] <- 0
+diferencias_sumdap <- diferencias_sumdap %>%  mutate(delta_sumdap = auditoria - inventario)
+
+#Delta área basal
+diferencias_areabasal <- area_basal_UM %>% pivot_wider(names_from = muestra, values_from = c(area_basal_m2))
+diferencias_areabasal$auditoria[is.na(diferencias_areabasal$auditoria)] <- 0
+diferencias_areabasal$inventario[is.na(diferencias_areabasal$inventario)] <- 0
+diferencias_areabasal <- diferencias_areabasal %>%  mutate(delta_areabasal = auditoria - inventario)
+
+#Delta altura promedio
+diferencias_alturaprom <- altura_promedio_UM %>% pivot_wider(names_from = muestra, values_from = c(altura_promedio_m))
+diferencias_alturaprom$auditoria[is.na(diferencias_alturaprom$auditoria)] <- 0
+diferencias_alturaprom$inventario[is.na(diferencias_alturaprom$inventario)] <- 0
+diferencias_alturaprom <- diferencias_alturaprom %>%  mutate(delta_alturaprom = auditoria - inventario)
+
+#Delta biomasa aérea
+diferencias_biomasa_aerea <- biomasa_aerea_UM %>% pivot_wider(names_from = muestra, values_from = c(biomasa_aerea_tn))
+diferencias_biomasa_aerea$auditoria[is.na(diferencias_biomasa_aerea$auditoria)] <- 0
+diferencias_biomasa_aerea$inventario[is.na(diferencias_biomasa_aerea$inventario)] <- 0
+diferencias_biomasa_aerea <- diferencias_biomasa_aerea %>%  mutate(delta_biomasa_aerea = auditoria - inventario)
+
+#Unión de resultados
+diferencias_UM <- join_all(list(diferencias_cantindividuos, diferencias_cantfustes, diferencias_sumdap, diferencias_areabasal, diferencias_alturaprom, diferencias_biomasa_aerea), by=c("id_um","parcela_concentrica"), type="full")
+diferencias_UM <- subset(diferencias_UM, select = -c(auditoria, inventario))
+
+
+#Gráficos de densidades de las diferencias ("delta_variable")
+diferencias_UM %>% ggplot(aes(x=delta_cantindividuos, color=parcela_concentrica)) + geom_density(alpha = 0.3, size = 1) + labs(y= "Densidad", x= "delta_cantidadindiv [cantidad de individuos]", subtitle="Diferencias en Cantidad de Individuos")
+diferencias_UM %>% ggplot(aes(x=delta_cantfustes, color=parcela_concentrica)) + geom_density(alpha = 0.3, size = 1) + labs(y= "Densidad", x= "delta_cantfustes [cantidad de fustes]", subtitle="Diferencias en Cantidad de Fustes")
+diferencias_UM %>% ggplot(aes(x=delta_sumdap, color=parcela_concentrica)) + geom_density(alpha = 0.3, size = 1) + labs(y= "Densidad", x= "delta_sumdap [m]", subtitle="Diferencias en Sumatoria de DAP")
+diferencias_UM %>% ggplot(aes(x=delta_areabasal, color=parcela_concentrica)) + geom_density(alpha = 0.3, size = 1)  + labs(y= "Densidad", x= "delta_areabasal [m2]", subtitle="Diferencias en Área Basal")
+diferencias_UM %>% ggplot(aes(x=delta_alturaprom, color=parcela_concentrica)) + geom_density(alpha = 0.3, size = 1) + labs(y= "Densidad", x= "delta_alturaprom [m]", subtitle="Diferencias en Altura Promedio")
+diferencias_UM %>% ggplot(aes(x=delta_biomasa_aerea, color=parcela_concentrica)) + geom_density(alpha = 0.3, size = 1) + labs(y= "Densidad", x= "delta_biomasa_aerea [tn]", subtitle="Diferencias en Biomasa Aérea")
+
+#Tests de normalidad
+diferencias_UM %>% group_by(parcela_concentrica) %>% shapiro_test(delta_cantindividuos, delta_cantfustes, delta_sumdap, delta_areabasal, delta_alturaprom, delta_biomasa_aerea) %>% add_significance()
+
+```
+
+Con los resultados de las diferencias entre las dos muestras para cada UM se calculan también los estimadores de posición y dispersión. Para variables continuas se utilizaron: la media y la desviación estándar de las diferencias (Kaufmann y Schwyzer, 2001); la media porcentual que es la media de las diferencias dividido por el resultado promedio de la muestra de auditoría (Kitahara et al., 2009); y el coeficiente de variación (CV) promedio entre las dos muestras (Barker et al., 2002). La media de las diferencias entre los valores de las dos muestras se considera una medida del componente sistemático del error en las mediciones; y la desviación estándar de las diferencias, para el componente aleatorio. Asumiendo que los equipos técnicos de inventario y de auditoría midieron con misma estocasticidad en los errores, entonces s/(√2) puede ser estimación del error de medición aleatorio (Kaufmann y Schwyzer, 2001). La hipótesis para distinguir si prevalecen las tendencias sistemáticas o las aleatorias puede ser validada con un tratamiento estadístico.
+
+Kaufmann, E., y Schwyzer, A. (2001). Control survey of the terrestrial inventory. En P. Brassel, y H. Lischke (Eds.), Swiss National Forest Inventory: Methods and Models of the Second Assessment (págs. 114-124). Birmensdorf, Swiss: WSL Swiss Federal Research Institute. https://www.dora.lib4ri.ch/wsl/islandora/object/wsl:10750
+
+Kitahara, F. M. (2009). Evaluation of data quality in Japanese National Forest Inventory. Environ Monit Asses, 159, 331-340. https://doi.org/10.1007/s10661-008-0632-8
+
+Barker, J., Bollman, M., Ringold, P., Sackinger, J., y Steve, C. (2002). Evaluation of Metric Precision for a Riparian Forest Survey. Environmental monitoring and assessment, 75, 51-72. https://doi.org/10.1023/A:1014259902449
+
+
+```{r Estimación de los Parámetros de Posición y Dispersión de las Diferencias  }
+
+#Cantidad de individuos
+estimadores_cantindividuos <- diferencias_UM %>% group_by(parcela_concentrica) %>% dplyr::summarise(
+    n = n(),
+    media = mean(delta_cantindividuos),
+    desv_estandar = sd(delta_cantindividuos),
+    componente_sistematico = mean(delta_cantindividuos),
+    componente_aleatorio = sd(delta_cantindividuos)/(sqrt(2)))
+
+estimadores_cantindividuos_cv <- cantidad_individuos_UM %>% group_by(id_um, parcela_concentrica) %>% dplyr::summarise(
+    n = n(),
+    media = mean(cantidad_individuos),
+    desv_estandar = sd(cantidad_individuos),
+    CV = desv_estandar/media)
+
+estimadores_cantindividuos$CVprom <- 0
+estimadores_cantindividuos[1,7] <- mean(estimadores_cantindividuos_cv$CV[estimadores_cantindividuos_cv$parcela_concentrica == "A"])*100
+estimadores_cantindividuos[2,7] <- mean(estimadores_cantindividuos_cv$CV[estimadores_cantindividuos_cv$parcela_concentrica == "B"])*100
+estimadores_cantindividuos[3,7] <- mean(estimadores_cantindividuos_cv$CV[estimadores_cantindividuos_cv$parcela_concentrica == "UM total"])*100
+
+estimadores_cantindividuos$media_porcentual <- 0 
+estimadores_cantindividuos[1,8] <- abs((estimadores_cantindividuos[1,3]/mean(cantidad_individuos_UM$cantidad_individuos[cantidad_individuos_UM$muestra == "auditoria" & cantidad_individuos_UM$parcela_concentrica == "A"]))*100)
+estimadores_cantindividuos[2,8] <- abs((estimadores_cantindividuos[2,3]/mean(cantidad_individuos_UM$cantidad_individuos[cantidad_individuos_UM$muestra == "auditoria" & cantidad_individuos_UM$parcela_concentrica == "B"]))*100)
+estimadores_cantindividuos[3,8] <- abs((estimadores_cantindividuos[3,3]/mean(cantidad_individuos_UM$cantidad_individuos[cantidad_individuos_UM$muestra == "auditoria" & cantidad_individuos_UM$parcela_concentrica == "UM total"]))*100)
+
+estimadores_cantindividuos$variable <- "Cantidad de individuos"
+estimadores_cantindividuos <- estimadores_cantindividuos[c(9,1,2,3,8,4,7,5,6)]
+
+#Cantidad de fustes
+estimadores_cantfustes <- diferencias_UM %>% group_by(parcela_concentrica) %>% dplyr::summarise(
+    n = n(),
+    media = mean(delta_cantfustes),
+    desv_estandar = sd(delta_cantfustes),
+    componente_sistematico = mean(delta_cantfustes),
+    componente_aleatorio = sd(delta_cantfustes)/(sqrt(2)))
+
+estimadores_cantfustes_cv <- cantidad_fustes_UM %>% group_by(id_um, parcela_concentrica) %>% dplyr::summarise(
+    n = n(),
+    media = mean(cantidad_fustes),
+    desv_estandar = sd(cantidad_fustes),
+    CV = desv_estandar/media)
+
+estimadores_cantfustes$CVprom <- 0
+estimadores_cantfustes[1,7] <- mean(estimadores_cantfustes_cv$CV[estimadores_cantfustes_cv$parcela_concentrica == "A"])*100
+estimadores_cantfustes[2,7] <- mean(estimadores_cantfustes_cv$CV[estimadores_cantfustes_cv$parcela_concentrica == "B"])*100
+estimadores_cantfustes[3,7] <- mean(estimadores_cantfustes_cv$CV[estimadores_cantfustes_cv$parcela_concentrica == "UM total"])*100
+
+estimadores_cantfustes$media_porcentual <- 0 
+estimadores_cantfustes[1,8] <- abs(estimadores_cantfustes[1,3]/mean(cantidad_fustes_UM$cantidad_fustes[cantidad_fustes_UM$muestra == "auditoria" & cantidad_fustes_UM$parcela_concentrica == "A"])*100)
+estimadores_cantfustes[2,8] <- abs(estimadores_cantfustes[2,3]/mean(cantidad_fustes_UM$cantidad_fustes[cantidad_fustes_UM$muestra == "auditoria" & cantidad_fustes_UM$parcela_concentrica == "B"])*100)
+estimadores_cantfustes[3,8] <- abs(estimadores_cantfustes[3,3]/mean(cantidad_fustes_UM$cantidad_fustes[cantidad_fustes_UM$muestra == "auditoria" & cantidad_fustes_UM$parcela_concentrica == "UM total"])*100)
+
+estimadores_cantfustes$variable <- "Cantidad de fustes"
+estimadores_cantfustes <- estimadores_cantfustes[c(9,1,2,3,8,4,7,5,6)]
+
+#Sumatoria de DAP
+estimadores_sumdap <- diferencias_UM %>% group_by(parcela_concentrica) %>% dplyr::summarise(
+    n = n(),
+    media = mean(delta_sumdap),
+    desv_estandar = sd(delta_sumdap),
+    componente_sistematico = mean(delta_sumdap),
+    componente_aleatorio = sd(delta_sumdap)/(sqrt(2)))
+
+estimadores_sumdap_cv <- sumatoria_DAP_UM %>% group_by(id_um, parcela_concentrica) %>% dplyr::summarise(
+    n = n(),
+    media = mean(sumatoria_dap_m),
+    desv_estandar = sd(sumatoria_dap_m),
+    CV = desv_estandar/media)
+
+estimadores_sumdap$CVprom <- 0
+estimadores_sumdap[1,7] <- mean(estimadores_sumdap_cv$CV[estimadores_sumdap_cv$parcela_concentrica == "A"])*100
+estimadores_sumdap[2,7] <- mean(estimadores_sumdap_cv$CV[estimadores_sumdap_cv$parcela_concentrica == "B"])*100
+estimadores_sumdap[3,7] <- mean(estimadores_sumdap_cv$CV[estimadores_sumdap_cv$parcela_concentrica == "UM total"])*100
+
+estimadores_sumdap$media_porcentual <- 0 
+estimadores_sumdap[1,8] <- abs((estimadores_sumdap[1,3]/mean(sumatoria_DAP_UM$sumatoria_dap_m[sumatoria_DAP_UM$muestra == "auditoria" & sumatoria_DAP_UM$parcela_concentrica == "A"]))*100)
+estimadores_sumdap[2,8] <- abs((estimadores_sumdap[2,3]/mean(sumatoria_DAP_UM$sumatoria_dap_m[sumatoria_DAP_UM$muestra == "auditoria" & sumatoria_DAP_UM$parcela_concentrica == "B"]))*100)
+estimadores_sumdap[3,8] <- abs((estimadores_sumdap[3,3]/mean(sumatoria_DAP_UM$sumatoria_dap_m[sumatoria_DAP_UM$muestra == "auditoria" & sumatoria_DAP_UM$parcela_concentrica == "UM total"]))*100)
+estimadores_sumdap$variable <- "Sumatoria de DAP"
+estimadores_sumdap <- estimadores_sumdap[c(9,1,2,3,8,4,7,5,6)]
+
+#Área Basal
+estimadores_areabasal <- diferencias_UM %>% group_by(parcela_concentrica) %>% dplyr::summarise(
+    n = n(),
+    media = mean(delta_areabasal),
+    desv_estandar = sd(delta_areabasal),
+    componente_sistematico = mean(delta_areabasal),
+    componente_aleatorio = sd(delta_areabasal)/(sqrt(2)))
+
+estimadores_areabasal_cv <- area_basal_UM %>% group_by(id_um, parcela_concentrica) %>% dplyr::summarise(
+    n = n(),
+    media = mean(area_basal_m2),
+    desv_estandar = sd(area_basal_m2),
+    CV = desv_estandar/media)
+
+estimadores_areabasal$CVprom <- 0
+estimadores_areabasal[1,7] <- mean(estimadores_areabasal_cv$CV[estimadores_areabasal_cv$parcela_concentrica == "A"])*100
+estimadores_areabasal[2,7] <- mean(estimadores_areabasal_cv$CV[estimadores_areabasal_cv$parcela_concentrica == "B"])*100
+estimadores_areabasal[3,7] <- mean(estimadores_areabasal_cv$CV[estimadores_areabasal_cv$parcela_concentrica == "UM total"])*100
+
+estimadores_areabasal$media_porcentual <- 0 
+estimadores_areabasal[1,8] <- abs((estimadores_areabasal[1,3]/mean(area_basal_UM$area_basal_m2[area_basal_UM$muestra == "auditoria" & area_basal_UM$parcela_concentrica == "A"]))*100)
+estimadores_areabasal[2,8] <- abs((estimadores_areabasal[2,3]/mean(area_basal_UM$area_basal_m2[area_basal_UM$muestra == "auditoria" & area_basal_UM$parcela_concentrica == "B"]))*100)
+estimadores_areabasal[3,8] <- abs((estimadores_areabasal[3,3]/mean(area_basal_UM$area_basal_m2[area_basal_UM$muestra == "auditoria" & area_basal_UM$parcela_concentrica == "UM total"]))*100)
+estimadores_areabasal$variable <- "Area Basal"
+estimadores_areabasal <- estimadores_areabasal[c(9,1,2,3,8,4,7,5,6)]
+
+#Altura promedio
+estimadores_alturaprom <- diferencias_UM %>% group_by(parcela_concentrica) %>% dplyr::summarise(
+    n = n(),
+    media = mean(delta_alturaprom),
+    desv_estandar = sd(delta_alturaprom),
+    componente_sistematico = mean(delta_alturaprom),
+    componente_aleatorio = sd(delta_alturaprom)/(sqrt(2)))
+
+estimadores_alturaprom_cv <- altura_promedio_UM %>% group_by(id_um, parcela_concentrica) %>% dplyr::summarise(
+    n = n(),
+    media = mean(altura_promedio_m),
+    desv_estandar = sd(altura_promedio_m),
+    CV = desv_estandar/media)
+
+estimadores_alturaprom$CVprom <- 0
+estimadores_alturaprom[1,7] <- mean(estimadores_alturaprom_cv$CV[estimadores_alturaprom_cv$parcela_concentrica == "A"])*100
+estimadores_alturaprom[2,7] <- mean(estimadores_alturaprom_cv$CV[estimadores_alturaprom_cv$parcela_concentrica == "B"])*100
+estimadores_alturaprom[3,7] <- mean(estimadores_alturaprom_cv$CV[estimadores_alturaprom_cv$parcela_concentrica == "UM total"])*100
+
+estimadores_alturaprom$media_porcentual <- 0 
+estimadores_alturaprom[1,8] <- abs((estimadores_alturaprom[1,3]/mean(altura_promedio_UM$altura_promedio_m[altura_promedio_UM$muestra == "auditoria" & altura_promedio_UM$parcela_concentrica == "A"]))*100)
+estimadores_alturaprom[2,8] <- abs((estimadores_alturaprom[2,3]/mean(altura_promedio_UM$altura_promedio_m[altura_promedio_UM$muestra == "auditoria" & altura_promedio_UM$parcela_concentrica == "B"]))*100)
+estimadores_alturaprom[3,8] <- abs((estimadores_alturaprom[3,3]/mean(altura_promedio_UM$altura_promedio_m[altura_promedio_UM$muestra == "auditoria" & altura_promedio_UM$parcela_concentrica == "UM total"]))*100)
+estimadores_alturaprom$variable <- "Altura promedio"
+estimadores_alturaprom <- estimadores_alturaprom[c(9,1,2,3,8,4,7,5,6)]
+
+#Biomasa aérea
+estimadores_biomasa_aerea <- diferencias_UM %>% group_by(parcela_concentrica) %>% dplyr::summarise(
+    n = n(),
+    media = mean(delta_biomasa_aerea),
+    desv_estandar = sd(delta_biomasa_aerea),
+    componente_sistematico = mean(delta_biomasa_aerea),
+    componente_aleatorio = sd(delta_biomasa_aerea)/(sqrt(2)))
+
+estimadores_biomasa_aerea_cv <- biomasa_aerea_UM %>% group_by(id_um, parcela_concentrica) %>% dplyr::summarise(
+    n = n(),
+    media = mean(biomasa_aerea_tn),
+    desv_estandar = sd(biomasa_aerea_tn),
+    CV = desv_estandar/media)
+
+estimadores_biomasa_aerea$CVprom <- 0
+estimadores_biomasa_aerea[1,7] <- mean(estimadores_biomasa_aerea_cv$CV[estimadores_biomasa_aerea_cv$parcela_concentrica == "A"])*100
+estimadores_biomasa_aerea[2,7] <- mean(estimadores_biomasa_aerea_cv$CV[estimadores_biomasa_aerea_cv$parcela_concentrica == "B"])*100
+estimadores_biomasa_aerea[3,7] <- mean(estimadores_biomasa_aerea_cv$CV[estimadores_biomasa_aerea_cv$parcela_concentrica == "UM total"])*100
+
+estimadores_biomasa_aerea$media_porcentual <- 0 
+estimadores_biomasa_aerea[1,8] <- abs((estimadores_biomasa_aerea[1,3]/mean(biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$muestra == "auditoria" & biomasa_aerea_UM$parcela_concentrica == "A"]))*100)
+estimadores_biomasa_aerea[2,8] <- abs((estimadores_biomasa_aerea[2,3]/mean(biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$muestra == "auditoria" & biomasa_aerea_UM$parcela_concentrica == "B"]))*100)
+estimadores_biomasa_aerea[3,8] <- abs((estimadores_biomasa_aerea[3,3]/mean(biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$muestra == "auditoria" & biomasa_aerea_UM$parcela_concentrica == "UM total"]))*100)
+estimadores_biomasa_aerea$variable <- "Biomasa aerea"
+estimadores_biomasa_aerea <- estimadores_biomasa_aerea[c(9,1,2,3,8,4,7,5,6)]
+
+estimadores_todos <- join_all(list(estimadores_cantindividuos, estimadores_cantfustes, estimadores_sumdap, estimadores_areabasal, estimadores_alturaprom, estimadores_biomasa_aerea), type="full")
+
+
+```
+
+La prueba t de Welch, o prueba t de varianzas desiguales, es una prueba de localización de dos muestras que se utiliza para probar la hipótesis de que dos poblaciones tienen medias iguales. Recibe el nombre de su creador, Bernard Lewis Welch, y es una adaptación de la prueba t de Student, y es más fiable cuando las dos muestras tienen varianzas desiguales y/o tamaños de muestra desiguales. La prueba t de Student supone que las dos distribuciones de la población (que se están comparando) se distribuyen normalmente con igual varianza, en cambio la prueba t de Welch está diseñada para una varianza desigual de la distribución de la muestra, pero el supuesto de la normalidad de la distribución de la muestra se mantiene. La prueba t de Welch es más robusta que la prueba t de Student y mantiene las tasas de error de tipo I cercanas a las nominales para varianzas desiguales y para tamaños de muestra desiguales bajo la normalidad. Además, la potencia de la prueba t de Welch se acerca a la de la prueba t de Student, incluso cuando las varianzas de la población son iguales y los tamaños de las muestras están equilibrados.
+
+Lu, Z. y Yuan, K. (2010). Welch's t test. En N. J. Salkind (Eds.), Encyclopedia of research design (págs. 1620-1623). Thousand Oaks, CA: Sage. https://doi.org/10.13140/RG.2.1.3057.9607 
+
+Como se detectó previamente las distribuciones de los estimadores no se comportan como normal para algunas variables. El test de normalidad puede indicar resultados significativos incluso para una pequeña desviación de la normalidad, pero para este caso en particular existen datos puntuales que se encuentran bastante alejados de la tendencia central. La falta de simetría ("Skewness") y el grado de apuntamiento ("Kurtosis") son las dos principales causas por las cuales una distribución puede desviarse de la normal (como se puede apreciar por ejemplo en los gráficos de densidad). Sin embargo, estas desviaciones con un tamaño de la muestra adecuado no afectarían considerablemente el resultado de un test como la prueba t de Welch (si se debe tener en consideración este aspecto para la discusión posterior).
+
+Ghasemi, A., y Zahediasl, S. (2012). Normality tests for statistical analysis: a guide for non-statisticians. International journal of endocrinology and metabolism, 10(2), 486–489. https://doi.org/10.5812/ijem.3505 
+
+Para el caso particular de la variable biomasa aérea de los individuos leñosos el test da un resultado no significativo. Dado que, como se verificó previamente, la distribución de los datos no es normal y que el tamaño de la muestra es relativamente pequeño (menor a 30); como medida conservadora se realiza además un Test de Wilcoxon-Mann-Whitney, cuyo resultado también es no significativo. Se confirma entonces que las diferencias entre las poblaciones muestra ocurrieron por aleatoriedad. 
+
+Fay, M. P., y Proschan, M. A. (2010). Wilcoxon-Mann-Whitney or t-test? On assumptions for hypothesis tests and multiple interpretations of decision rules. Stat Surv., 4, 1-39. https://doi.org/10.1214/09-SS051
+
+
+```{r Test Prueba t de Welch}
+
+#Hipótesis Nula (Ho): las medias de los dos grupos son idénticas (mA == mI)
+#Hipótesis Alternativa (Ha): las medias de los dos grupos son diferentes (mA != mI)
+
+#Utilización de la función "pipe-fiendly" t_test() del paquete "rstatix", que es un "wrapper" en base a la función t.test() de R. Por defecto, R ejecuta el Test de Welch, si se quiere aplicar el Test de Student se debe espicificar el argumento var.equal = TRUE.
+
+
+#Cantidad de individuos
+welch_cantindividuos_A <- cantidad_individuos_UM %>% filter(parcela_concentrica == "A") %>% t_test(cantidad_individuos ~ muestra) %>% add_significance()
+welch_cantindividuos_A[1,1] <- "cantidad_individuos_A"
+welch_cantindividuos_B <- cantidad_individuos_UM %>% filter(parcela_concentrica == "B") %>% t_test(cantidad_individuos ~ muestra) %>% add_significance()
+welch_cantindividuos_B[1,1] <- "cantidad_individuos_B"
+welch_cantindividuos_UM <- cantidad_individuos_UM %>% filter(parcela_concentrica == "UM total") %>% t_test(cantidad_individuos ~ muestra) %>% add_significance()
+welch_cantindividuos_UM[1,1] <- "cantidad_individuos_UM"
+welch_cantindividuos <- join_all(list(welch_cantindividuos_A, welch_cantindividuos_B, welch_cantindividuos_UM), type="full")
+
+#Cantidad de fustes
+welch_cantfustes_A <- cantidad_fustes_UM %>% filter(parcela_concentrica == "A") %>% t_test(cantidad_fustes ~ muestra) %>% add_significance()
+welch_cantfustes_A[1,1] <- "cantidad_fustes_A"
+welch_cantfustes_B <- cantidad_fustes_UM %>% filter(parcela_concentrica == "B") %>% t_test(cantidad_fustes ~ muestra) %>% add_significance()
+welch_cantfustes_B[1,1] <- "cantidad_fustes_B"
+welch_cantfustes_UM <- cantidad_fustes_UM %>% filter(parcela_concentrica == "UM total") %>% t_test(cantidad_fustes ~ muestra) %>% add_significance()
+welch_cantfustes_UM[1,1] <- "cantidad_fustes_UM"
+welch_cantfustes <- join_all(list(welch_cantfustes_A, welch_cantfustes_B, welch_cantfustes_UM), type="full")
+
+#Sumatoria de DAP
+welch_sumdap_A <- sumatoria_DAP_UM %>% filter(parcela_concentrica == "A") %>% t_test(sumatoria_dap_m ~ muestra) %>% add_significance()
+welch_sumdap_A[1,1] <- "sumatoria_dap_A"
+welch_sumdap_B <- sumatoria_DAP_UM %>% filter(parcela_concentrica == "B") %>% t_test(sumatoria_dap_m ~ muestra) %>% add_significance()
+welch_sumdap_B[1,1] <- "sumatoria_dap_B"
+welch_sumdap_UM <- sumatoria_DAP_UM %>% filter(parcela_concentrica == "UM total") %>% t_test(sumatoria_dap_m ~ muestra) %>% add_significance()
+welch_sumdap_UM[1,1] <- "sumatoria_dap_UM"
+welch_sumdap <- join_all(list(welch_sumdap_A, welch_sumdap_B, welch_sumdap_UM), type="full")
+
+#Area basal
+welch_areabasal_A <- area_basal_UM %>% filter(parcela_concentrica == "A") %>% t_test(area_basal_m2 ~ muestra) %>% add_significance()
+welch_areabasal_A[1,1] <- "area_basal_A"
+welch_areabasal_B <- area_basal_UM %>% filter(parcela_concentrica == "B") %>% t_test(area_basal_m2 ~ muestra) %>% add_significance()
+welch_areabasal_B[1,1] <- "area_basal_B"
+welch_areabasal_UM <- area_basal_UM %>% filter(parcela_concentrica == "UM total") %>% t_test(area_basal_m2 ~ muestra) %>% add_significance()
+welch_areabasal_UM[1,1] <- "area_basal_UM"
+welch_areabasal <- join_all(list(welch_areabasal_A, welch_areabasal_B, welch_areabasal_UM), type="full")
+
+#Altura promedio
+welch_alturaprom_A <- altura_promedio_UM %>% filter(parcela_concentrica == "A") %>% t_test(altura_promedio_m ~ muestra) %>% add_significance()
+welch_alturaprom_A[1,1] <- "altura_promedio_A"
+welch_alturaprom_B <- altura_promedio_UM %>% filter(parcela_concentrica == "B") %>% t_test(altura_promedio_m ~ muestra) %>% add_significance()
+welch_alturaprom_B[1,1] <- "altura_promedio_B"
+welch_alturaprom_UM <- altura_promedio_UM %>% filter(parcela_concentrica == "UM total") %>% t_test(altura_promedio_m ~ muestra) %>% add_significance()
+welch_alturaprom_UM[1,1] <- "altura_promedio_UM"
+welch_alturaprom <- join_all(list(welch_alturaprom_A, welch_alturaprom_B, welch_alturaprom_UM), type="full")
+
+#Biomasa aérea
+welch_biomasa_aerea_A <- biomasa_aerea_UM %>% filter(parcela_concentrica == "A") %>% t_test(biomasa_aerea_tn ~ muestra) %>% add_significance()
+welch_biomasa_aerea_A[1,1] <- "biomasa_aerea_A"
+welch_biomasa_aerea_B <- biomasa_aerea_UM %>% filter(parcela_concentrica == "B") %>% t_test(biomasa_aerea_tn ~ muestra) %>% add_significance()
+welch_biomasa_aerea_B[1,1] <- "biomasa_aerea_B"
+welch_biomasa_aerea_UM <- biomasa_aerea_UM %>% filter(parcela_concentrica == "UM total") %>% t_test(biomasa_aerea_tn ~ muestra) %>% add_significance()
+welch_biomasa_aerea_UM[1,1] <- "biomasa_aerea_UM"
+welch_biomasa_aerea <- join_all(list(welch_biomasa_aerea_A, welch_biomasa_aerea_B, welch_biomasa_aerea_UM), type="full")
+
+#Unión de resultados de los tests
+welch_todos <- join_all(list(welch_cantindividuos, welch_cantfustes, welch_sumdap, welch_areabasal, welch_alturaprom, welch_biomasa_aerea), type="full")
+
+#Prueba de igualdad de varianzas (homocedasticidad) y test no paramétrico para biomasa aérea (en base a su distribución y el n)
+fligner.test(x = list(biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$parcela_concentrica == "A" & biomasa_aerea_UM$muestra == "auditoria"],biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$parcela_concentrica == "A" & biomasa_aerea_UM$muestra == "inventario"]))
+fligner.test(x = list(biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$parcela_concentrica == "B" & biomasa_aerea_UM$muestra == "auditoria"],biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$parcela_concentrica == "B" & biomasa_aerea_UM$muestra == "inventario"]))
+fligner.test(x = list(biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$parcela_concentrica == "UM total" & biomasa_aerea_UM$muestra == "auditoria"],biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$parcela_concentrica == "UM total" & biomasa_aerea_UM$muestra == "inventario"]))
+
+wilcox.test(x = biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$parcela_concentrica == "A" & biomasa_aerea_UM$muestra == "auditoria"], y = biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$parcela_concentrica == "A" & biomasa_aerea_UM$muestra == "inventario"], alternative = "two.sided", mu = 0, paired = FALSE, conf.int = 0.95)
+wilcox.test(x = biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$parcela_concentrica == "B" & biomasa_aerea_UM$muestra == "auditoria"], y = biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$parcela_concentrica == "B" & biomasa_aerea_UM$muestra == "inventario"], alternative = "two.sided", mu = 0, paired = FALSE, conf.int = 0.95)
+wilcox.test(x = biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$parcela_concentrica == "UM total" & biomasa_aerea_UM$muestra == "auditoria"], y = biomasa_aerea_UM$biomasa_aerea_tn[biomasa_aerea_UM$parcela_concentrica == "UM total" & biomasa_aerea_UM$muestra == "inventario"], alternative = "two.sided", mu = 0, paired = FALSE, conf.int = 0.95)
+
+
+```
+
+## Alcance de los Errores de Medición en el Compartimiento de la Biomasa Aérea para el Análisis de Incertidumbres en el Marco de la Determinación de Emisiones Forestales
+
+Las estimaciones de incertidumbre constituyen un elemento esencial de cualquier inventario exhaustivo de emisiones y
+absorciones de gases de efecto invernadero. Se las debe obtener tanto para el nivel nacional como para la estimación de la tendencia, así como para componentes tales como los factores de emisión, los datos de la actividad y otros parámetros de
+estimación correspondientes a cada categoría. Según el IPCC la incertidumbre es la falta de conocimiento del valor verdadero de una variable que puede describirse como una función de densidad de probabilidad (FDP) que caracteriza el rango y la probabilidad de los valores posibles. Los errores de medición influyen sobre la incertidumbre del factor de emisión y son una de las ocho causas amplias de incertidumbre (así como lo es también el error de muestreo estadístico, entre otros). Particularmente en Argentina, para la construcción del nivel de referencia de emisiones forestales, se tuvo en cuenta por un lado la actividad de deforestación (datos de actividad) y por el otro los depósitos de carbono de la biomasa aérea y la subterránea (factor de emisión) de los individuos leñosos. 
+
+Frey, C., Penman, J., Hanle, L., Monni, Suvi., y Ogle, S. (2006). Chapter 3: Uncertainties. En  Eggleston H.S., Buendia L., Miwa K., Ngara T. y Tanabe K. (Eds). 2006 IPCC Guidelines for National Greenhouse Gas Inventories, Prepared by the National Greenhouse Gas Inventories Programme. Japón: IGES. https://www.ipcc-nggip.iges.or.jp/public/2006gl/pdf/1_Volume1/V1_3_Ch3_Uncertainties.pdf
+
+SAyDS, S. d. (2019 c). ANEXO TÉCNICO REDD+: Resultados alcanzados por la República Argentina por la Reducción de Emisiones de Gases de Efecto Invernadero por deforestación. SAyDS, Secretaría de Gobierno de Ambiente y Desarrollo Sustentable de la Nación. https://www.argentina.gob.ar/ambiente/cambio-climatico/tercer-informe-bienal
+
+Para conocer el alcance de los errores de medición de la biomasa aérea es posible utilizar un enfoque de simulaciones de "Monte Carlo", que se ejecutan utilizando algoritmos que generan valores estocásticos basados en la FDP de los datos, en este caso el de las diferencias encontradas en la auditoría. El objetivo de estas simulaciones repetidas es producir una distribución
+que represente la probabilidad de diferentes estimaciones incorporando los errores de medición detectados. En cada simulación un error para la variable estudiada se genera en base a un muestreo sobre la distribución observada del error de medición. Este valor se añade a los datos ya observados en el inventario, para finalmente se puede obtener la FDP de las estimaciones de biomasa aérea contemplando los errores de medición, por medio de la cual se puede obtener los estimadores para calcular la incertidumbre. La buena práctica exige la utilización de un intervalo de confianza de 95 por ciento, y se puede expresar como un porcentaje de la estimación central. En los casos en los que la FDP es simétrica, el intervalo de confianza puede expresarse convenientemente como la mitad del ancho del intervalo, dividida por el valor estimado de la variable. Este resultado es un insumo más que contribuye para el cálculo de la incertidumbre del factor de emisión, la cual posteriormente es componente para los métodos de propagación y así obtener la incertidumbre total de las emisiones consideradas.
+
+Holdaway, R. J., McNeill, S. J., Mason, N. W. H., y Carswell, F. E. (2014). Propagating Uncertainty in Plot-based Estimates of Forest Carbon Stock and Carbon Stock Change. Ecosystems 17, 627-640. https://doi.org/10.1007/s10021-014-9749-5 
+
+
+```{r Incertidumbre de la Biomasa Áerea asociada al Error de Medición }
+
+#Localización de los datos de la FDP para los errores de medición (con los componentes sistemático y aleatorio)
+biomasa_aerea_error_media_A <- estimadores_biomasa_aerea$componente_sistematico[estimadores_biomasa_aerea$parcela_concentrica == "A"]
+biomasa_aerea_error_desv_A <- estimadores_biomasa_aerea$componente_aleatorio[estimadores_biomasa_aerea$parcela_concentrica == "A"]
+biomasa_aerea_error_media_B <- estimadores_biomasa_aerea$componente_sistematico[estimadores_biomasa_aerea$parcela_concentrica == "B"]
+biomasa_aerea_error_desv_B <- estimadores_biomasa_aerea$componente_aleatorio[estimadores_biomasa_aerea$parcela_concentrica == "B"]
+
+#Simulación de 1000 estimaciones de biomasa, utilizando datos base del inventario y agregandole un error de medición generado aleatoriamente.
+resultados_simulacion <- data.frame( "sim_media" = 0, "sim_desv_estandar" = 0) #objeto para almacenar resultados
+for(i in 1:1000)
+	{
+  #Insumo base
+  datos_entrada <- biomasa_aerea_UM %>% filter(muestra == "inventario" & (parcela_concentrica == "A" | parcela_concentrica == "B"))
+  #Muestreo sobre la distribución observada del error de medición para generar un vector de posibles valores
+  biomasa_aerea_conerror_A <- rnorm(length(datos_entrada$biomasa_aerea_tn[datos_entrada$parcela_concentrica == "A"]), biomasa_aerea_error_media_A, biomasa_aerea_error_desv_A)
+  biomasa_aerea_conerror_B <- rnorm(length(datos_entrada$biomasa_aerea_tn[datos_entrada$parcela_concentrica == "B"]), biomasa_aerea_error_media_B, biomasa_aerea_error_desv_B)
+  #Incorporación de los errores a los datos de base
+  datos_entrada$biomasa_aerea_tn[datos_entrada$parcela_concentrica == "A"] <- datos_entrada$biomasa_aerea_tn[datos_entrada$parcela_concentrica == "A"] + biomasa_aerea_conerror_A
+  datos_entrada$biomasa_aerea_tn[datos_entrada$parcela_concentrica == "B"] <- datos_entrada$biomasa_aerea_tn[datos_entrada$parcela_concentrica == "B"] + biomasa_aerea_conerror_B
+  #Estimación de toneladas por hectárea de biomasa área como insumo para construir el factor de emisión
+  datos_entrada$biomasa_aerea_tn <- ifelse(datos_entrada$biomasa_aerea_tn < 0, 0, datos_entrada$biomasa_aerea_tn)
+  datos_entrada$biomasa_aerea_tn_ha <- ifelse(datos_entrada$parcela_concentrica == "A", datos_entrada$biomasa_aerea_tn * 10, datos_entrada$biomasa_aerea_tn * 39.3)
+	#Se almacenan los resultados de los estadísticos principales para continuar con el ciclo
+	resultados_simulacion[i,1] <- mean(datos_entrada$biomasa_aerea_tn_ha)
+	resultados_simulacion[i,2] <- sd(datos_entrada$biomasa_aerea_tn_ha)
+  }
+
+#Gráfico de densidad (FDP) de los resultados de la simulación
+resultados_simulacion %>% ggplot(aes(x=sim_media)) + geom_density(alpha = 0.3, size = 1) + labs(y= "Densidad", x= "Biomasa Aérea [tn/ha]", subtitle="FDP con Error de Medición Incorporado")
+
+#Test de normalidad
+resultados_simulacion %>% shapiro_test(sim_media) %>% add_significance()
+
+#Cálculo del rango y la incertidumbre en %
+incertidumbre <- resultados_simulacion %>% summarise(mean = ci(sim_media)[1], lowCI = ci(sim_media)[2], hiCI = ci(sim_media)[3])
+incertidumbre$amplitud <- incertidumbre$hiCI - incertidumbre$lowCI
+incertidumbre$incertidumbre_porcentual <- ((0.5 * incertidumbre$amplitud)/incertidumbre$mean)*100
+
+
+```
+
+Mejores estimaciones de la incertidumbre permitirán a los países garantizar la contabilidad del carbono forestal, contribuirán a una gestión transparente, y apoyarán los esfuerzos para hacer un seguimiento de las emisiones mundiales de gases de efecto invernadero. Una estrategia para reducir las emisiones de carbono de los bosques consiste en proporcionar a los países en desarrollo incentivos financieros basados en los resultados para reducir la deforestación: actualmente se han comprometido casi 2.000 millones de dólares para financiar esos programas. Hay tres programas multilaterales, en gran parte financiados por los gobiernos donantes- que ofrecen estos incentivos financieros, incluido el Fondo del Carbono del Fondo Cooperativo para el Carbono de los Bosques (FCPF, 900 millones de dólares); la Iniciativa del Fondo del Biocarbono para los Paisajes Forestales Sostenibles (ISFL, 360 millones de dólares); y el Programa Piloto de Pagos basados en los Resultados de REDD+ del Fondo Verde para el Clima (FVC, 500 millones de dólares).
+
+Los países que participan en estos programas deben documentar la incertidumbre en sus estimaciones y los pagos se reducen si las incertidumbres son altas. En este sentido, este "Protocolo para el Análisis de los Errores de Medición en Estrato Forestal en torno a la Variable Biomasa Aérea" permite reforzar las capacidades de la República Argentina para cumplir con las expectativas de estos programas, en especial el FVC aprobó en Noviembre de 2020 el "Pago Basado en Resultados" por 82 millones de dólares. En el marco de este programa, la información sobre las incertidumbres agregadas debe notificarse a partir de 2019, las siguientes deducciones se hacen sobre las reducciones de emisiones que el Fondo comprará: no hay deducción si la incertidumbre es menor al 30%; 2% de deducción con 30% a 50% de incertidumbre; 4% de deducción si la incertidumbre es mayor al 50%. 
+
+Yanai, R. D., Wayson, C., Lee, D., Espejo, A. B., Campbell, J. L., Green, M. B., Zukswert, J. M., Yoffe, S. B., Aukema, J. E., Lister, A. J., Kirchner, J. W., Gamarra, J. G. P. (2020). Improving uncertainty in forest carbon accounting for REDD+ mitigation efforts. Environ. Res. Lett., 15, 124002. https://doi.org/10.1088/1748-9326/abb96f
+
+Green Climate Fund.  (2020).  Argentina REDD-plus RBP for results period 2014-2016. Recuperado el 21 de diciembre de 2020 de https://www.greenclimate.fund/project/fp142#overview
